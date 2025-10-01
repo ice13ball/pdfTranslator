@@ -109,10 +109,11 @@ def translate_pdf(pdf_path, target_lang):
                         translated_line = translate_text(line_text, target_lang)
                         
                         # Insert translated line at the same position
-                        rect = fitz.Rect(line_bbox[0], line_bbox[1], line_bbox[2], line_bbox[3])
+                        # Use bottom-left of the line bbox as insertion point
+                        x, y = line_bbox[0], line_bbox[3]
                         # Use font size from first span
                         font_size = line['spans'][0]['size'] if line['spans'] else 12
-                        new_page.insert_textbox(rect, translated_line, fontsize=font_size, align=0)
+                        new_page.insert_text((x, y), translated_line, fontsize=font_size)
     
     # Use tempfile for output
     output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
