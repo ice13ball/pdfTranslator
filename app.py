@@ -103,20 +103,22 @@ def translate_pdf(pdf_path, target_lang):
         for block in text_dict['blocks']:
             if block['type'] == 0:  # Text block
                 for line in block['lines']:
-                    for span in line['spans']:
-                        text = span['text']
-                        bbox = span['bbox']
-                        font_size = span['size']
+                    # Collect all text in the line
+                    line_text = ''.join(span['text'] for span in line['spans'])
+                    line_bbox = line['bbox']
+                    
+                    if line_text.strip():
+                        # Translate the entire line
+                        translated_line = translate_text(line_text, target_lang)
                         
-                        # Translate text
-                        translated_text = translate_text(text, target_lang)
-                        
-                        # Cover original text with white rectangle
-                        rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+                        # Cover original line with white rectangle
+                        rect = fitz.Rect(line_bbox[0], line_bbox[1], line_bbox[2], line_bbox[3])
                         new_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
                         
-                        # Insert translated text in the same bounding box
-                        new_page.insert_textbox(rect, translated_text, fontsize=font_size, align=0)
+                        # Insert translated line in the same bounding box
+                        # Use font size from first span
+                        font_size = line['spans'][0]['size'] if line['spans'] else 12
+                        new_page.insert_textbox(rect, translated_line, fontsize=font_size, align=0)
     
     # Use tempfile for output
     output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
