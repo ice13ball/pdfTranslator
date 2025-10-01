@@ -80,11 +80,8 @@ def translate_pdf(pdf_path, target_lang):
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         
-        # Create new page with same dimensions
+        # Create new blank page with same dimensions
         new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
-        
-        # Copy the original page content (preserves images, backgrounds, etc.)
-        new_page.show_pdf_page(new_page.rect, doc, page_num)
         
         text_dict = page.get_text("dict")
         print(f"Page {page_num}: extracted {len(text_dict['blocks'])} text blocks")
@@ -99,7 +96,7 @@ def translate_pdf(pdf_path, target_lang):
         if len(total_text) == 0:
             print("Warning: No text extracted from this page. The PDF may be image-based or scanned.")
         
-        # Overlay translated text
+        # Insert translated text on blank page
         for block in text_dict['blocks']:
             if block['type'] == 0:  # Text block
                 for line in block['lines']:
@@ -111,11 +108,8 @@ def translate_pdf(pdf_path, target_lang):
                         # Translate the entire line
                         translated_line = translate_text(line_text, target_lang)
                         
-                        # Cover original line with white rectangle
+                        # Insert translated line at the same position
                         rect = fitz.Rect(line_bbox[0], line_bbox[1], line_bbox[2], line_bbox[3])
-                        new_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
-                        
-                        # Insert translated line in the same bounding box
                         # Use font size from first span
                         font_size = line['spans'][0]['size'] if line['spans'] else 12
                         new_page.insert_textbox(rect, translated_line, fontsize=font_size, align=0)
