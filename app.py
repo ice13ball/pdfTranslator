@@ -75,12 +75,16 @@ def translate_pdf(pdf_path, target_lang):
     
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        text_dict = page.get_text("dict")
         
         # Create new page with same dimensions
         new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
         
-        # Copy text blocks with translation
+        # Copy the original page content (preserves images, backgrounds, etc.)
+        new_page.show_pdf_page(new_page.rect, doc, page_num)
+        
+        text_dict = page.get_text("dict")
+        
+        # Overlay translated text
         for block in text_dict['blocks']:
             if block['type'] == 0:  # Text block
                 for line in block['lines']:
@@ -92,12 +96,9 @@ def translate_pdf(pdf_path, target_lang):
                         # Translate text
                         translated_text = translate_text(text, target_lang)
                         
-                        # Insert translated text at original position
-                        new_page.insert_text(
-                            (bbox[0], bbox[3]),  # Bottom-left of bbox
-                            translated_text, 
-                            fontsize=font_size
-                        )
+                        # Insert translated text in the same bounding box
+                        rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+                        new_page.insert_textbox(rect, translated_text, fontsize=font_size, align=0)
     
     # Use tempfile for output
     output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
