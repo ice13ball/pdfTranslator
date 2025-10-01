@@ -9,6 +9,14 @@ A simple Python web app to translate PDF files while preserving their format usi
 
 ## Setup
 
+### Quick Setup (Windows)
+Run the PowerShell script:
+```powershell
+.\install.ps1
+```
+
+### Manual Setup
+
 1. Create a virtual environment with Python 3.12:
    ```bash
    python3.12 -m venv venv
