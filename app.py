@@ -44,6 +44,8 @@ def upload():
     if not lang:
         return "No language selected", 400
     
+    print(f"Uploaded file: {file.filename}, Target language: {lang}")
+    
     # Save uploaded file temporarily
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     temp_path = temp_file.name
@@ -67,9 +69,11 @@ def upload():
     except Exception as e:
         # Clean up on error
         os.unlink(temp_path)
+        print(f"Error during translation: {e}")
         return str(e), 500
 
 def translate_pdf(pdf_path, target_lang):
+    print(f"Starting PDF translation for {pdf_path} to {target_lang}")
     doc = fitz.open(pdf_path)
     new_doc = fitz.open()
     
@@ -83,6 +87,17 @@ def translate_pdf(pdf_path, target_lang):
         new_page.show_pdf_page(new_page.rect, doc, page_num)
         
         text_dict = page.get_text("dict")
+        print(f"Page {page_num}: extracted {len(text_dict['blocks'])} text blocks")
+        
+        total_text = ""
+        for block in text_dict['blocks']:
+            if block['type'] == 0:
+                for line in block['lines']:
+                    for span in line['spans']:
+                        total_text += span['text']
+        print(f"Total extracted text length: {len(total_text)} characters")
+        if len(total_text) == 0:
+            print("Warning: No text extracted from this page. The PDF may be image-based or scanned.")
         
         # Overlay translated text
         for block in text_dict['blocks']:
@@ -96,8 +111,11 @@ def translate_pdf(pdf_path, target_lang):
                         # Translate text
                         translated_text = translate_text(text, target_lang)
                         
-                        # Insert translated text in the same bounding box
+                        # Cover original text with white rectangle
                         rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+                        new_page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+                        
+                        # Insert translated text in the same bounding box
                         new_page.insert_textbox(rect, translated_text, fontsize=font_size, align=0)
     
     # Use tempfile for output
@@ -108,12 +126,14 @@ def translate_pdf(pdf_path, target_lang):
     new_doc.save(output_path)
     new_doc.close()
     doc.close()
+    print(f"Translation completed, output saved to {output_path}")
     return output_path
 
 def translate_text(text, target_lang):
     if not text.strip():
         return text
     
+    print(f"Translating text: '{text}' to {target_lang}")
     try:
         response = client.chat.completions.create(
             model=deployment,
@@ -123,7 +143,9 @@ def translate_text(text, target_lang):
             ],
             max_tokens=1000
         )
-        return response.choices[0].message.content.strip()
+        translated = response.choices[0].message.content.strip()
+        print(f"Translated to: '{translated}'")
+        return translated
     except Exception as e:
         print(f"Translation error: {e}")
         return text  # Return original if translation fails
