@@ -80,8 +80,11 @@ def translate_pdf(pdf_path, target_lang):
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         
-        # Create new blank page with same dimensions
+        # Create new page with same dimensions
         new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+        
+        # Copy the original page content (preserves images, backgrounds, etc.)
+        new_page.show_pdf_page(new_page.rect, doc, page_num)
         
         text_dict = page.get_text("dict")
         print(f"Page {page_num}: extracted {len(text_dict['blocks'])} text blocks")
@@ -96,7 +99,7 @@ def translate_pdf(pdf_path, target_lang):
         if len(total_text) == 0:
             print("Warning: No text extracted from this page. The PDF may be image-based or scanned.")
         
-        # Insert translated text on blank page
+        # Overlay translated text
         for block in text_dict['blocks']:
             if block['type'] == 0:  # Text block
                 for line in block['lines']:
