@@ -3,6 +3,7 @@ import os
 import fitz
 from openai import AzureOpenAI
 from dotenv import load_dotenv
+import tempfile
 
 load_dotenv()
 
@@ -44,17 +45,29 @@ def upload():
         return "No language selected", 400
     
     # Save uploaded file temporarily
-    temp_path = "/tmp/upload.pdf"
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    temp_path = temp_file.name
+    temp_file.close()
     file.save(temp_path)
     
-    # Translate PDF
-    translated_pdf_path = translate_pdf(temp_path, lang)
-    
-    # Clean up temp file
-    os.remove(temp_path)
-    
-    # Send translated PDF
-    return send_file(translated_pdf_path, as_attachment=True, download_name="translated.pdf")
+    try:
+        # Translate PDF
+        translated_pdf_path = translate_pdf(temp_path, lang)
+        
+        # Send translated PDF
+        response = send_file(translated_pdf_path, as_attachment=True, download_name="translated.pdf")
+        
+        # Clean up files after sending
+        @response.call_on_close
+        def cleanup():
+            os.unlink(temp_path)
+            os.unlink(translated_pdf_path)
+        
+        return response
+    except Exception as e:
+        # Clean up on error
+        os.unlink(temp_path)
+        return str(e), 500
 
 def translate_pdf(pdf_path, target_lang):
     doc = fitz.open(pdf_path)
@@ -86,7 +99,11 @@ def translate_pdf(pdf_path, target_lang):
                             fontsize=font_size
                         )
     
-    output_path = "/tmp/translated.pdf"
+    # Use tempfile for output
+    output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    output_path = output_file.name
+    output_file.close()
+    
     new_doc.save(output_path)
     new_doc.close()
     doc.close()
