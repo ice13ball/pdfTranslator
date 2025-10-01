@@ -5,6 +5,7 @@ A simple Python web app to translate PDF files while preserving their format usi
 ## Requirements
 
 - Python 3.12 (Python 3.13 not yet supported by PyMuPDF)
+- Cross-platform compatible (works on Windows, macOS, Linux)
 
 ## Setup
 
@@ -15,7 +16,11 @@ A simple Python web app to translate PDF files while preserving their format usi
 
 2. Activate the virtual environment:
    ```bash
+   # On macOS/Linux:
    source venv/bin/activate
+   
+   # On Windows:
+   venv\Scripts\activate
    ```
 
 3. Install dependencies:
