@@ -57,9 +57,17 @@ Run the PowerShell script:
 2. Choose the target language from the dropdown.
 4. Download the translated PDF.
 
-## Limitations
+## Limitations and Intended Use
 
-- Works best with text-based PDFs. Complex layouts with images may not preserve all formatting.
-- Translation quality depends on the input PDF's text extraction accuracy.
-- Large PDFs may take longer to process.
+- **Internal use only**. This tool is intended for non-production, internal workflows (review, drafts, enablement). Do not use for customer-facing deliverables without manual QA.
+- **No OCR**. Scanned/image-only PDFs are not translated because text cannot be extracted. Use OCR first to convert to selectable text.
+- **Layout fidelity**. The app tries to preserve layout, but some text may be slightly re-positioned or appear with background patches. Long lines may be auto-shrunk to fit.
+- **Images and graphics**. Images are preserved; complex vector elements behind text can cause minor artifacts in some slides.
+- **Fonts and glyphs**. The app embeds a Unicode font (DejaVu Sans) for overlays. Rare glyphs may still render differently from the original.
+- **Performance and size**. Very large PDFs or pages with many images will take longer and may increase output size slightly.
+- **Privacy & data**. Do not upload confidential or regulated data. Content is sent to Azure OpenAI according to your Azure subscription/data policies.
+- **Copyright**. Ensure you have the right to translate the PDF content.
+
+> Note: This project is provided as-is without warranty. Validate all outputs before sharing externally.
+
 # pdfTranslator
