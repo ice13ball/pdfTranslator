@@ -4,6 +4,7 @@ import fitz
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 import tempfile
+from typing import Optional
 
 load_dotenv()
 
@@ -30,6 +31,26 @@ LANGUAGES = [
     "Swedish", "Tamil", "Telugu", "Thai", "Turkish", "Ukrainian", "Urdu", 
     "Vietnamese", "Welsh", "Xhosa", "Zulu"
 ]
+
+# Try to locate a Unicode-capable font (DejaVu Sans) for overlays
+def _find_font_path() -> Optional[str]:
+    here = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(here, "fonts", "DejaVuSans.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/DejaVuSans.ttf",
+        "/Library/Fonts/DejaVu Sans.ttf",
+        "C\\\Windows\\Fonts\\DejaVuSans.ttf",
+    ]
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                return p
+        except Exception:
+            continue
+    return None
+
+FONT_PATH = _find_font_path()
 
 @app.route('/')
 def index():
@@ -79,12 +100,7 @@ def translate_pdf(pdf_path, target_lang):
     
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        
-        # Create new page with same dimensions
-        new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
-        
-        # Copy the original page content (preserves images, backgrounds, etc.)
-        new_page.show_pdf_page(new_page.rect, doc, page_num)
+        page_rect = page.rect
         
         text_dict = page.get_text("dict")
         print(f"Page {page_num}: extracted {len(text_dict['blocks'])} text blocks")
@@ -99,7 +115,8 @@ def translate_pdf(pdf_path, target_lang):
         if len(total_text) == 0:
             print("Warning: No text extracted from this page. The PDF may be image-based or scanned.")
         
-        # Overlay translated text
+        # First pass: add redaction annotations to remove original text cleanly
+        redaction_rects = []
         for block in text_dict['blocks']:
             if block['type'] == 0:  # Text block
                 for line in block['lines']:
@@ -108,15 +125,76 @@ def translate_pdf(pdf_path, target_lang):
                     line_bbox = line['bbox']
                     
                     if line_text.strip():
-                        # Translate the entire line
-                        translated_line = translate_text(line_text, target_lang)
-                        
-                        # Insert translated line at the same position
-                        # Use bottom-left of the line bbox as insertion point
-                        x, y = line_bbox[0], line_bbox[3]
-                        # Use font size from first span
-                        font_size = line['spans'][0]['size'] if line['spans'] else 12
-                        new_page.insert_text((x, y), translated_line, fontsize=font_size)
+                        # Compute a tight rectangle around actual text spans (ignore tiny spans)
+                        valid_spans = [
+                            s for s in line['spans']
+                            if s.get('text', '').strip() and s.get('size', 0) >= 5
+                        ]
+                        if not valid_spans:
+                            valid_spans = line['spans']
+
+                        x0 = min(s['bbox'][0] for s in valid_spans)
+                        y0 = min(s['bbox'][1] for s in valid_spans)
+                        x1 = max(s['bbox'][2] for s in valid_spans)
+                        y1 = max(s['bbox'][3] for s in valid_spans)
+                        pad = 0.4
+                        rect = fitz.Rect(x0, y0 - pad, x1, y1 + pad)
+                        redaction_rects.append(rect)
+        # Apply redactions (remove original text) on the source page
+        for r in redaction_rects:
+            page.add_redact_annot(r, fill=None, cross_out=False)
+        try:
+            page.apply_redactions(images=2, graphics=0, text=1)
+        except Exception as e:
+            print(f"Redaction apply failed on page {page_num}: {e}")
+
+        # Now create the output page and copy the redacted content as a raster background
+        # This avoids vector artifacts and guarantees original text is gone
+        new_page = new_doc.new_page(width=page_rect.width, height=page_rect.height)
+        try:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            new_page.insert_image(new_page.rect, pixmap=pix)
+        except Exception as e:
+            print(f"Pixmap render failed on page {page_num}, falling back to vector copy: {e}")
+            new_page.show_pdf_page(new_page.rect, doc, page_num)
+
+        # Second pass: draw translated text only (no painting)
+        for block in text_dict['blocks']:
+            if block['type'] == 0:
+                for line in block['lines']:
+                    line_text = ''.join(span['text'] for span in line['spans'])
+                    if not line_text.strip():
+                        continue
+                    # Translate and sanitize
+                    translated_line = translate_text(line_text, target_lang)
+                    translated_line = translated_line.lstrip('•◦·-–—*? \t').rstrip()
+
+                    # Fit into the line bbox
+                    valid_spans = [s for s in line['spans'] if s.get('text','').strip() and s.get('size',0)>=5]
+                    if not valid_spans:
+                        valid_spans = line['spans']
+                    x0 = min(s['bbox'][0] for s in valid_spans)
+                    y0 = min(s['bbox'][1] for s in valid_spans)
+                    x1 = max(s['bbox'][2] for s in valid_spans)
+                    y1 = max(s['bbox'][3] for s in valid_spans)
+                    rect = fitz.Rect(x0, y0 - 0.2, x1, y1 + 0.2)
+                    base_size = valid_spans[0]['size'] if valid_spans else 12
+                    size = base_size
+                    rv = -1.0
+                    for _ in range(8):
+                        kwargs = dict(fontsize=size, color=(0,0,0), lineheight=1.05, align=0)
+                        if FONT_PATH:
+                            kwargs["fontfile"] = FONT_PATH
+                        rv = new_page.insert_textbox(rect, translated_line, **kwargs)
+                        if rv >= 0:
+                            break
+                        size *= 0.9
+                    if rv < 0:
+                        size = max(6, base_size * 0.6)
+                        if FONT_PATH:
+                            new_page.insert_text((rect.x0, rect.y1 - 0.2), translated_line, fontsize=size, color=(0,0,0), fontfile=FONT_PATH)
+                        else:
+                            new_page.insert_text((rect.x0, rect.y1 - 0.2), translated_line, fontsize=size, color=(0,0,0))
     
     # Use tempfile for output
     output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
