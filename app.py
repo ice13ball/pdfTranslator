@@ -5,10 +5,17 @@ from openai import AzureOpenAI
 from dotenv import load_dotenv
 import tempfile
 from typing import Optional
+import logging
+import re
 
 load_dotenv()
 
 app = Flask(__name__)
+
+# Logging configuration (set LOG_LEVEL=DEBUG in .env to increase verbosity)
+logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+                    format='[%(levelname)s] %(message)s')
+logger = logging.getLogger("pdfTranslator")
 
 # Azure OpenAI setup
 client = AzureOpenAI(
@@ -94,7 +101,7 @@ def upload():
         return str(e), 500
 
 def translate_pdf(pdf_path, target_lang):
-    print(f"Starting PDF translation for {pdf_path} to {target_lang}")
+    logger.info(f"Starting PDF translation for {pdf_path} to {target_lang}")
     doc = fitz.open(pdf_path)
     new_doc = fitz.open()
     
@@ -111,73 +118,103 @@ def translate_pdf(pdf_path, target_lang):
                 for line in block['lines']:
                     for span in line['spans']:
                         total_text += span['text']
-        print(f"Total extracted text length: {len(total_text)} characters")
+        logger.info(f"Page {page_num}: total extracted text length = {len(total_text)} characters")
         if len(total_text) == 0:
-            print("Warning: No text extracted from this page. The PDF may be image-based or scanned.")
+            logger.warning("No text extracted from this page. The PDF may be image-based or scanned.")
         
-        # First pass: add redaction annotations to remove original text cleanly
-        redaction_rects = []
+        # Render a pixmap once for background color sampling
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+
+        # Create a new page and copy original content (images/background preserved)
+        new_page = new_doc.new_page(width=page_rect.width, height=page_rect.height)
+        new_page.show_pdf_page(new_page.rect, doc, page_num)
+
+        # Overlay translated text and hide source text with locally matched background
         for block in text_dict['blocks']:
             if block['type'] == 0:  # Text block
                 for line in block['lines']:
-                    # Collect all text in the line
-                    line_text = ''.join(span['text'] for span in line['spans'])
-                    line_bbox = line['bbox']
-                    
-                    if line_text.strip():
-                        # Compute a tight rectangle around actual text spans (ignore tiny spans)
-                        valid_spans = [
-                            s for s in line['spans']
-                            if s.get('text', '').strip() and s.get('size', 0) >= 5
-                        ]
-                        if not valid_spans:
-                            valid_spans = line['spans']
-
-                        x0 = min(s['bbox'][0] for s in valid_spans)
-                        y0 = min(s['bbox'][1] for s in valid_spans)
-                        x1 = max(s['bbox'][2] for s in valid_spans)
-                        y1 = max(s['bbox'][3] for s in valid_spans)
-                        pad = 0.4
-                        rect = fitz.Rect(x0, y0 - pad, x1, y1 + pad)
-                        redaction_rects.append(rect)
-        # Apply redactions (remove original text) on the source page
-        for r in redaction_rects:
-            page.add_redact_annot(r, fill=None, cross_out=False)
-        try:
-            page.apply_redactions(images=2, graphics=0, text=1)
-        except Exception as e:
-            print(f"Redaction apply failed on page {page_num}: {e}")
-
-        # Now create the output page and copy the redacted content as a raster background
-        # This avoids vector artifacts and guarantees original text is gone
-        new_page = new_doc.new_page(width=page_rect.width, height=page_rect.height)
-        try:
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            new_page.insert_image(new_page.rect, pixmap=pix)
-        except Exception as e:
-            print(f"Pixmap render failed on page {page_num}, falling back to vector copy: {e}")
-            new_page.show_pdf_page(new_page.rect, doc, page_num)
-
-        # Second pass: draw translated text only (no painting)
-        for block in text_dict['blocks']:
-            if block['type'] == 0:
-                for line in block['lines']:
+                    # Collect text
                     line_text = ''.join(span['text'] for span in line['spans'])
                     if not line_text.strip():
                         continue
-                    # Translate and sanitize
+
+                    # Translate and sanitize bullets that may appear as '?'
                     translated_line = translate_text(line_text, target_lang)
                     translated_line = translated_line.lstrip('•◦·-–—*? \t').rstrip()
+                    if re.match(r"^(sure|certainly|here's|here is|ok|okay)[\s,]", translated_line, flags=re.I):
+                        logger.debug(f"Sanitizing assistant preamble on page {page_num}")
+                        translated_line = re.sub(r"^(sure|certainly|here's|here is|ok|okay)[\s,:-]+", "", translated_line, flags=re.I)
 
-                    # Fit into the line bbox
-                    valid_spans = [s for s in line['spans'] if s.get('text','').strip() and s.get('size',0)>=5]
+                    # Choose spans used to compute rects
+                    valid_spans = [
+                        s for s in line['spans']
+                        if s.get('text', '').strip() and s.get('size', 0) >= 5
+                    ]
                     if not valid_spans:
                         valid_spans = line['spans']
+
+                    # Group spans to avoid painting long bars
+                    groups = []
+                    current = [valid_spans[0]] if valid_spans else []
+                    for s in valid_spans[1:]:
+                        gap = s['bbox'][0] - current[-1]['bbox'][2]
+                        if gap > 3:
+                            groups.append(current)
+                            current = [s]
+                        else:
+                            current.append(s)
+                    if current:
+                        groups.append(current)
+
+                    # Helper for sampling background color
+                    def sample_rgb(px, py):
+                        px = min(max(0, px), pix.width - 1)
+                        py = min(max(0, py), pix.height - 1)
+                        base = (py * pix.width + px) * pix.n
+                        return (
+                            pix.samples[base] / 255.0,
+                            pix.samples[base + 1] / 255.0,
+                            pix.samples[base + 2] / 255.0,
+                        )
+
+                    scale_x = pix.width / page_rect.width
+                    scale_y = pix.height / page_rect.height
+                    pad = 0.3
+
+                    # Paint per-span with local sampling to hide original text
+                    for g in groups:
+                        for sp in g:
+                            sx0, sy0, sx1, sy1 = sp['bbox']
+                            if sx1 - sx0 < 1 or sy1 - sy0 < 1:
+                                continue
+                            srect = fitz.Rect(sx0, sy0 - pad, sx1, sy1 + pad)
+                            try:
+                                tx1 = int(max(0, (srect.x0 - 1) * scale_x))
+                                ty1 = int(max(0, (srect.y0 - 1) * scale_y))
+                                tx2 = int(min(pix.width - 1, (srect.x1 + 1) * scale_x))
+                                ty2 = int(min(pix.height - 1, (srect.y1 + 1) * scale_y))
+                                mx = int(((srect.x0 + srect.x1) / 2) * scale_x)
+                                my = int(((srect.y0 + srect.y1) / 2) * scale_y)
+                                smps = [
+                                    sample_rgb(tx1, ty1), sample_rgb(tx2, ty1),
+                                    sample_rgb(tx1, ty2), sample_rgb(tx2, ty2),
+                                    sample_rgb(mx, my)
+                                ]
+                                rr = sum(v[0] for v in smps) / len(smps)
+                                gg = sum(v[1] for v in smps) / len(smps)
+                                bb = sum(v[2] for v in smps) / len(smps)
+                                span_bg = (rr, gg, bb)
+                            except Exception:
+                                span_bg = (1, 1, 1)
+                            new_page.draw_rect(srect, color=span_bg, fill=span_bg, width=0)
+                            logger.debug(f"Paint span rect {srect} bg={span_bg}")
+
+                    # Write translated text inside the line bbox with auto-fit
                     x0 = min(s['bbox'][0] for s in valid_spans)
                     y0 = min(s['bbox'][1] for s in valid_spans)
                     x1 = max(s['bbox'][2] for s in valid_spans)
                     y1 = max(s['bbox'][3] for s in valid_spans)
-                    rect = fitz.Rect(x0, y0 - 0.2, x1, y1 + 0.2)
+                    lrect = fitz.Rect(x0, y0 - 0.2, x1, y1 + 0.2)
                     base_size = valid_spans[0]['size'] if valid_spans else 12
                     size = base_size
                     rv = -1.0
@@ -185,16 +222,18 @@ def translate_pdf(pdf_path, target_lang):
                         kwargs = dict(fontsize=size, color=(0,0,0), lineheight=1.05, align=0)
                         if FONT_PATH:
                             kwargs["fontfile"] = FONT_PATH
-                        rv = new_page.insert_textbox(rect, translated_line, **kwargs)
+                        rv = new_page.insert_textbox(lrect, translated_line, **kwargs)
+                        logger.debug(f"insert_textbox rv={rv} size={size} rect={lrect}")
                         if rv >= 0:
                             break
                         size *= 0.9
                     if rv < 0:
                         size = max(6, base_size * 0.6)
                         if FONT_PATH:
-                            new_page.insert_text((rect.x0, rect.y1 - 0.2), translated_line, fontsize=size, color=(0,0,0), fontfile=FONT_PATH)
+                            new_page.insert_text((lrect.x0, lrect.y1 - 0.2), translated_line, fontsize=size, color=(0,0,0), fontfile=FONT_PATH)
                         else:
-                            new_page.insert_text((rect.x0, rect.y1 - 0.2), translated_line, fontsize=size, color=(0,0,0))
+                            new_page.insert_text((lrect.x0, lrect.y1 - 0.2), translated_line, fontsize=size, color=(0,0,0))
+                        logger.debug(f"Fallback insert_text size={size} at ({lrect.x0}, {lrect.y1 - 0.2})")
     
     # Use tempfile for output
     output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
@@ -204,28 +243,32 @@ def translate_pdf(pdf_path, target_lang):
     new_doc.save(output_path)
     new_doc.close()
     doc.close()
-    print(f"Translation completed, output saved to {output_path}")
+    logger.info(f"Translation completed, output saved to {output_path}")
     return output_path
 
 def translate_text(text, target_lang):
     if not text.strip():
         return text
-    
-    print(f"Translating text: '{text}' to {target_lang}")
+
+    logger.debug(f"Translating to {target_lang}: len={len(text)} sample='{text[:60].replace('\n',' ')}'")
     try:
         response = client.chat.completions.create(
             model=deployment,
             messages=[
-                {"role": "system", "content": f"You are a professional translator. Translate the following text to {target_lang}. Maintain the original meaning, tone, and formatting as much as possible."},
+                {"role": "system", "content": (
+                    f"You are a professional translator. Translate the user's text to {target_lang}. "
+                    "Return ONLY the translated text with no quotes, no explanations, no preface, no bullets added. "
+                    "Preserve punctuation; keep line breaks and list markers if present."
+                )},
                 {"role": "user", "content": text}
             ],
             max_tokens=1000
         )
         translated = response.choices[0].message.content.strip()
-        print(f"Translated to: '{translated}'")
+        logger.debug(f"Translated len={len(translated)} sample='{translated[:60].replace('\n',' ')}'")
         return translated
     except Exception as e:
-        print(f"Translation error: {e}")
+        logger.error(f"Translation error: {e}")
         return text  # Return original if translation fails
 
 if __name__ == '__main__':
